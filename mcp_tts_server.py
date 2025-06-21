@@ -549,7 +549,8 @@ def timer_thread_worker(timer: Timer):
                 return
         
         # Execute the timer notification
-        asyncio.create_task(execute_timer_notification(timer))
+        # Use asyncio.run() to create a new event loop for this thread
+        asyncio.run(execute_timer_notification(timer))
         
         # Handle repeat timers
         if timer.repeat and timer.is_active:
