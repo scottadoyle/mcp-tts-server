@@ -1,0 +1,173 @@
+# MCP Text-to-Speech Notification Server
+
+An MCP (Model Context Protocol) server that provides text-to-speech capabilities for AI assistants to speak notifications audibly to humans.
+
+## Features
+
+- Implements the Model Context Protocol (MCP)
+- Provides tools for text-to-speech conversion
+- Uses Google Text-to-Speech (gTTS) for high-quality voice synthesis
+- Supports multiple languages and voices
+- Designed for AI assistants to notify users when not actively watching the screen
+- Supports multiple transport methods (stdio, streamable HTTP)
+- Implements LLM sampling for enhanced notification messages
+- Defines roots for resource boundaries
+- Includes smart notification generation
+- Comprehensive logging and debugging capabilities
+- Compatible with MCP Inspector
+- Performance tracking and metrics
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/mcp-tts-server.git
+cd mcp-tts-server
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Starting the Server
+
+```bash
+# Run the MCP server with stdio transport (default)
+python mcp_tts_server.py
+
+# Or run with HTTP transport
+MCP_TTS_HTTP_TRANSPORT=true python mcp_tts_server.py
+
+# Run in debug mode
+MCP_TTS_DEBUG=true python mcp_tts_server.py
+
+# Run in mock mode (for testing without audio)
+MCP_TTS_MOCK_MODE=true python mcp_tts_server.py
+```
+
+### Tool Capabilities
+
+This MCP server provides the following tools:
+
+1. `speak` - Converts text to speech and plays it audibly
+   - Parameters:
+     - `text` (required): The text to speak
+     - `voice` (optional): Language/voice code (default: "en")
+
+2. `notify` - Speaks a notification with a standardized format
+   - Parameters:
+     - `message` (required): The notification message
+     - `type` (optional): Type of notification ("info", "success", "warning", "error")
+     - `voice` (optional): Language/voice code (default: "en")
+     - `enhance` (optional): Use LLM to enhance the notification text (default: false)
+
+3. `bell` - Plays a bell sound to alert the user without speaking text
+   - Parameters:
+     - `type` (optional): Type of bell sound ("standard", "success", "warning", "error")
+     - `count` (optional): Number of times to ring the bell (1-5, default: 1)
+
+4. `smart_notify` - Generate and speak a notification based on event context
+   - Parameters:
+     - `event` (required): The event to notify about (e.g., 'task_complete', 'error')
+     - `context` (optional): Additional context about the event
+     - `type` (optional): Type of notification (default: "info")
+     - `voice` (optional): Language/voice code (default: "en")
+
+5. `test_notification` - Send a test notification to verify the server is working
+   - Parameters:
+     - `voice` (optional): Language/voice code (default: "en")
+
+## Advanced Features
+
+### LLM Sampling
+
+The server uses LLM sampling to:
+1. Enhance notification messages when requested
+2. Generate smart notifications based on event context
+
+This allows the notifications to be more natural and context-aware.
+
+### Multiple Transport Methods
+
+The server supports two transport methods:
+- `stdio`: Standard input/output transport (default)
+- `HTTP`: Streamable HTTP transport with server-sent events
+
+### Resources
+
+The server provides example notification templates as resources that can be accessed by clients. These resources are located under the notification root URI.
+
+### Debugging & Monitoring
+
+The server includes comprehensive debugging features:
+- Request ID tracking in logs
+- Performance metrics for tool calls and speech synthesis
+- Mock mode for testing without audio
+- Detailed logging with configurable levels
+- Client-side log messages via MCP
+- Support for MCP Inspector for interactive testing
+
+## Integration with Claude
+
+To use this MCP server with Claude:
+
+1. Start the MCP server:
+   ```bash
+   python mcp_tts_server.py
+   ```
+
+2. Configure Claude to use the MCP server using the appropriate flags or settings in your Claude integration.
+
+3. Claude can then use the tools to audibly notify the user.
+
+## Configuration
+
+You can configure the server by setting the following environment variables:
+
+- `MCP_TTS_DEFAULT_VOICE`: Default voice/language to use (default: "en")
+- `MCP_TTS_LOG_LEVEL`: Logging level (default: "INFO")
+- `MCP_TTS_HTTP_TRANSPORT`: Use HTTP transport (default: "false")
+- `MCP_TTS_HTTP_PORT`: Port for HTTP transport (default: "8080")
+- `MCP_TTS_ROOT`: Root URI for notifications (default: "file:///notifications/tts")
+- `MCP_TTS_DEBUG`: Enable debug mode (default: "false")
+- `MCP_TTS_TRACE_REQUESTS`: Log all request parameters (default: "false")
+- `MCP_TTS_MOCK_MODE`: Run in mock mode without audio (default: "false")
+
+## Testing
+
+### Included Test Script
+
+To test the server, you can use the included test script:
+
+```bash
+python test_speak.py
+```
+
+This will simulate a client connection and request the server to speak a test message.
+
+### Using MCP Inspector
+
+For interactive testing and debugging, you can use the MCP Inspector:
+
+```bash
+# Install the inspector (if you haven't already)
+npm install -g @modelcontextprotocol/inspector
+
+# Run the inspector with the server
+npx @modelcontextprotocol/inspector --server="python mcp_tts_server.py"
+```
+
+The Inspector provides a graphical interface for exploring the server's capabilities, testing tools, and viewing logs.
+
+### Test Notification Tool
+
+You can also use the built-in `test_notification` tool to verify the server is working:
+
+```bash
+# This will appear in the Inspector's tool list
+```
+
+## License
+
+MIT

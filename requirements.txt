@@ -1,0 +1,6 @@
+mcp-python-sdk>=0.1.0
+gTTS>=2.3.2
+pygame>=2.0.0
+numpy>=1.19.0
+scipy>=1.6.0
+python-dotenv>=1.0.0

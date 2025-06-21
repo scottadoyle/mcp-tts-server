@@ -1,0 +1,35 @@
+{
+  "name": "mcp-tts-server",
+  "version": "1.0.0",
+  "description": "MCP Server for text-to-speech notifications using Google TTS",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "mcp",
+    "tts",
+    "text-to-speech",
+    "notifications",
+    "llm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/typescript-sdk": "^0.1.0",
+    "google-tts-api": "^2.0.2",
+    "node-fetch": "^3.3.1",
+    "play-sound": "^1.1.5",
+    "zod": "^3.21.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.2.5",
+    "@types/play-sound": "^1.1.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.1.3"
+  }
+}
