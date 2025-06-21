@@ -24,7 +24,10 @@ import math
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
 
+# Suppress pygame startup messages that can interfere with JSON communication
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
+
 from gtts import gTTS
 from scipy.io import wavfile
 from fastmcp import FastMCP
@@ -33,18 +36,15 @@ from fastmcp import FastMCP
 try:
     from dotenv import load_dotenv
     load_dotenv()
-    logger.info("Loaded environment variables from .env file")
 except ImportError:
-    logger.info("python-dotenv not available, using system environment variables only")
+    pass  # python-dotenv not available, using system environment variables only
 
 # Try to import Google Cloud TTS - optional feature
 try:
     from google.cloud import texttospeech
     GOOGLE_CLOUD_TTS_AVAILABLE = True
-    logger.info("Google Cloud Text-to-Speech library is available")
 except ImportError:
     GOOGLE_CLOUD_TTS_AVAILABLE = False
-    logger.info("Google Cloud Text-to-Speech library not installed - using gTTS only")
 
 # Configure logging
 log_level = os.getenv("MCP_TTS_LOG_LEVEL", "INFO")
@@ -82,6 +82,18 @@ class RequestContextFilter(logging.Filter):
 # Create and add the filter
 request_context = RequestContextFilter()
 logger.addFilter(request_context)
+
+# Log startup information
+try:
+    from dotenv import load_dotenv
+    logger.info("Loaded environment variables from .env file")
+except ImportError:
+    logger.info("python-dotenv not available, using system environment variables only")
+
+if GOOGLE_CLOUD_TTS_AVAILABLE:
+    logger.info("Google Cloud Text-to-Speech library is available")
+else:
+    logger.info("Google Cloud Text-to-Speech library not installed - using gTTS only")
 
 # Initialize pygame for audio playback
 try:
