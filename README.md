@@ -5,8 +5,10 @@ An MCP (Model Context Protocol) server that provides text-to-speech capabilities
 ## Features
 
 - Implements the Model Context Protocol (MCP)
-- Provides tools for text-to-speech conversion
-- Uses Google Text-to-Speech (gTTS) for high-quality voice synthesis
+- **Dual TTS support**: 
+  - **gTTS** (default): Free, no credentials required
+  - **Google Cloud TTS** (optional): Premium voices, requires setup
+- Automatic fallback from Google Cloud TTS to gTTS
 - Supports multiple languages and voices
 - Designed for AI assistants to notify users when not actively watching the screen
 - Supports multiple transport methods (stdio, streamable HTTP)
@@ -17,16 +19,39 @@ An MCP (Model Context Protocol) server that provides text-to-speech capabilities
 - Compatible with MCP Inspector
 - Performance tracking and metrics
 
-## Installation
+## Quick Start
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mcp-tts-server.git
+git clone https://github.com/scottadoyle/mcp-tts-server.git
 cd mcp-tts-server
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Ready to use with default gTTS!
+# No configuration needed for basic functionality
 ```
+
+## TTS Services
+
+### gTTS (Default)
+- ✅ **Free and anonymous**
+- ✅ **No credentials required**
+- ✅ **Works immediately**
+- ⚠️ Basic voice quality
+- ⚠️ Limited voice options
+
+### Google Cloud TTS (Optional)
+- ✅ **Premium voice quality**
+- ✅ **380+ voices in 50+ languages**
+- ✅ **WaveNet AI voices**
+- ✅ **Generous free tier** (1-4M chars/month)
+- ⚠️ **Requires Google Cloud setup**
+- ⚠️ **Requires billing account**
+- ⚠️ **Uses your credentials**
+
+➡️ **See [GOOGLE_CLOUD_SETUP.md](GOOGLE_CLOUD_SETUP.md) for optional premium setup**
 
 ## Usage
 

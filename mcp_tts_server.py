@@ -29,6 +29,15 @@ from gtts import gTTS
 from scipy.io import wavfile
 from fastmcp import FastMCP
 
+# Try to import Google Cloud TTS - optional feature
+try:
+    from google.cloud import texttospeech
+    GOOGLE_CLOUD_TTS_AVAILABLE = True
+    logger.info("Google Cloud Text-to-Speech library is available")
+except ImportError:
+    GOOGLE_CLOUD_TTS_AVAILABLE = False
+    logger.info("Google Cloud Text-to-Speech library not installed - using gTTS only")
+
 # Configure logging
 log_level = os.getenv("MCP_TTS_LOG_LEVEL", "INFO")
 DEBUG_MODE = os.getenv("MCP_TTS_DEBUG", "false").lower() in ("true", "1", "yes")
@@ -103,17 +112,42 @@ BELL_SETTINGS = {
 }
 
 # Configuration
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 DEFAULT_VOICE = os.getenv("MCP_TTS_DEFAULT_VOICE", "en")
 USE_HTTP_TRANSPORT = os.getenv("MCP_TTS_HTTP_TRANSPORT", "false").lower() in ("true", "1", "yes")
 HTTP_PORT = int(os.getenv("MCP_TTS_HTTP_PORT", "8080"))
 NOTIFICATIONS_ROOT = os.getenv("MCP_TTS_ROOT", "file:///notifications/tts")
 MOCK_MODE = os.getenv("MCP_TTS_MOCK_MODE", "false").lower() in ("true", "1", "yes")
 
+# Google Cloud TTS Configuration
+GOOGLE_CLOUD_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+USE_GOOGLE_CLOUD_TTS = os.getenv("MCP_TTS_USE_GOOGLE_CLOUD", "false").lower() in ("true", "1", "yes")
+GOOGLE_CLOUD_TTS_VOICE_TYPE = os.getenv("MCP_TTS_GOOGLE_VOICE_TYPE", "standard")  # standard or wavenet
+
 # Initialize MCP server
 mcp = FastMCP(
     "tts-notify"
 )
+
+# Initialize Google Cloud TTS client if available and configured
+google_tts_client = None
+if GOOGLE_CLOUD_TTS_AVAILABLE and USE_GOOGLE_CLOUD_TTS:
+    try:
+        if GOOGLE_CLOUD_CREDENTIALS_PATH and os.path.exists(GOOGLE_CLOUD_CREDENTIALS_PATH):
+            google_tts_client = texttospeech.TextToSpeechClient()
+            logger.info(f"Google Cloud TTS client initialized with credentials from {GOOGLE_CLOUD_CREDENTIALS_PATH}")
+        else:
+            # Try to use default credentials (if running on GCP or gcloud auth is set up)
+            google_tts_client = texttospeech.TextToSpeechClient()
+            logger.info("Google Cloud TTS client initialized with default credentials")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Google Cloud TTS client: {e}")
+        logger.info("Falling back to gTTS for text-to-speech")
+        google_tts_client = None
+elif USE_GOOGLE_CLOUD_TTS and not GOOGLE_CLOUD_TTS_AVAILABLE:
+    logger.warning("Google Cloud TTS requested but library not installed. Install with: pip install google-cloud-texttospeech")
+else:
+    logger.info("Using gTTS for text-to-speech")
 
 # Define roots
 ROOTS = [
@@ -135,7 +169,7 @@ RESOURCES = {
 TOOL_SCHEMA = {
     "speak": {
         "name": "speak",
-        "description": "Speaks the provided text aloud using text-to-speech",
+        "description": "Speaks the provided text aloud using text-to-speech. Supports both free gTTS and premium Google Cloud TTS (if configured).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -145,7 +179,7 @@ TOOL_SCHEMA = {
                 },
                 "voice": {
                     "type": "string",
-                    "description": "Language/voice code (e.g., 'en', 'fr', 'en-uk')",
+                    "description": "Language/voice code (e.g., 'en', 'fr', 'en-US', 'fr-FR'). For Google Cloud TTS use full locale codes.",
                     "default": DEFAULT_VOICE
                 }
             },
@@ -272,6 +306,20 @@ TOOL_SCHEMA = {
             "openWorldHint": False,
             "isDebugTool": True
         }
+    },
+    "tts_status": {
+        "name": "tts_status",
+        "description": "Get information about available TTS services and current configuration",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "annotations": {
+            "title": "TTS Status",
+            "readOnlyHint": True,
+            "openWorldHint": False,
+            "isDebugTool": True
+        }
     }
 }
 
@@ -377,6 +425,97 @@ def generate_bell_sound(bell_type: str, count: int = 1) -> Tuple[bool, Optional[
         return False, error_msg
 
 
+async def synthesize_with_google_cloud(text: str, voice: str = DEFAULT_VOICE, request_id: str = None) -> Tuple[bool, Optional[str]]:
+    """Convert text to speech using Google Cloud TTS and play it.
+    
+    Args:
+        text: The text to convert to speech
+        voice: Language/voice code (e.g., 'en-US', 'fr-FR')
+        request_id: Current request ID for logging
+        
+    Returns:
+        Tuple of (success, error_message)
+    """
+    if not google_tts_client:
+        return False, "Google Cloud TTS client not available"
+    
+    if not text:
+        logger.warning("Empty text provided for Google Cloud TTS synthesis")
+        return False, "Empty text provided"
+    
+    # Set the request context for logging
+    if request_id:
+        request_context.set_request_id(request_id)
+    
+    try:
+        start_time = time.time()
+        
+        # Parse voice string to extract language and voice name
+        language_code = voice if '-' in voice else f"{voice}-US"
+        
+        # Determine voice type based on configuration
+        if GOOGLE_CLOUD_TTS_VOICE_TYPE.lower() == "wavenet":
+            voice_name = f"{language_code}-Wavenet-A"
+        else:
+            voice_name = f"{language_code}-Standard-A"
+        
+        # Create the synthesis input
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        
+        # Build the voice request
+        voice_params = texttospeech.VoiceSelectionParams(
+            language_code=language_code,
+            name=voice_name
+        )
+        
+        # Select the type of audio file to return
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+        
+        logger.debug(f"Generating speech with Google Cloud TTS: text='{text}', voice={voice_name}")
+        
+        # Perform the text-to-speech request
+        response = google_tts_client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice_params,
+            audio_config=audio_config
+        )
+        
+        # Create a temporary file for the audio
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
+            temp_filename = temp_file.name
+            temp_file.write(response.audio_content)
+            logger.debug(f"Created temporary file: {temp_filename}")
+        
+        # Play the speech
+        logger.info(f"Playing Google Cloud TTS synthesized speech: '{text}'")
+        pygame.mixer.music.load(temp_filename)
+        pygame.mixer.music.play()
+        
+        # Wait for the audio to finish playing
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        
+        # Clean up
+        pygame.mixer.music.unload()
+        os.unlink(temp_filename)
+        logger.debug(f"Cleaned up temporary file: {temp_filename}")
+        
+        # Track performance
+        duration = time.time() - start_time
+        track_timing("speech_synthesis", f"google-{GOOGLE_CLOUD_TTS_VOICE_TYPE}", duration)
+        logger.debug(f"Google Cloud TTS synthesis completed in {duration:.2f} seconds")
+        
+        return True, None
+        
+    except Exception as e:
+        error_msg = f"Error with Google Cloud TTS synthesis: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return False, error_msg
+
+
 async def synthesize_and_play(text: str, voice: str = DEFAULT_VOICE, request_id: str = None) -> Tuple[bool, Optional[str]]:
     """Convert text to speech and play it.
     
@@ -402,6 +541,17 @@ async def synthesize_and_play(text: str, voice: str = DEFAULT_VOICE, request_id:
         time.sleep(0.5)  # Simulate speech synthesis time
         return True, None
     
+    # Try Google Cloud TTS first if available and enabled
+    if google_tts_client and USE_GOOGLE_CLOUD_TTS:
+        logger.debug("Using Google Cloud Text-to-Speech")
+        success, error = await synthesize_with_google_cloud(text, voice, request_id)
+        if success:
+            return success, error
+        else:
+            logger.warning(f"Google Cloud TTS failed: {error}. Falling back to gTTS.")
+    
+    # Fall back to gTTS
+    logger.debug("Using gTTS for speech synthesis")
     try:
         start_time = time.time()
         
@@ -875,6 +1025,88 @@ async def test_notification(params: Dict[str, Any]):
             "success": False,
             "content": {"error": error or "Failed to synthesize or play test notification"}
         }
+
+
+@mcp.tool
+async def tts_status(params: Dict[str, Any]):
+    """Get information about available TTS services and current configuration.
+    
+    Returns:
+        Tool response with TTS service status information
+    """
+    # Generate unique request ID
+    request_id = f"status-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    logger.info("Getting TTS service status")
+    
+    # Check which services are available
+    services = {
+        "gTTS": {
+            "available": True,
+            "description": "Free Google Text-to-Speech via public API",
+            "voice_quality": "Basic",
+            "cost": "Free",
+            "requires_credentials": False
+        }
+    }
+    
+    # Check Google Cloud TTS availability
+    if GOOGLE_CLOUD_TTS_AVAILABLE:
+        google_cloud_status = {
+            "available": True,
+            "description": "Premium Google Cloud Text-to-Speech API",
+            "voice_quality": "High (Standard) / Premium (WaveNet)",
+            "cost": "Free tier: 4M chars/month (Standard), 1M chars/month (WaveNet)",
+            "requires_credentials": True,
+            "configured": google_tts_client is not None,
+            "voice_type": GOOGLE_CLOUD_TTS_VOICE_TYPE,
+            "enabled": USE_GOOGLE_CLOUD_TTS
+        }
+        
+        if google_tts_client:
+            google_cloud_status["status"] = "Ready"
+        elif USE_GOOGLE_CLOUD_TTS:
+            google_cloud_status["status"] = "Enabled but not initialized (check credentials)"
+        else:
+            google_cloud_status["status"] = "Available but disabled"
+    else:
+        google_cloud_status = {
+            "available": False,
+            "description": "Premium Google Cloud Text-to-Speech API",
+            "status": "Library not installed (pip install google-cloud-texttospeech)",
+            "requires_credentials": True
+        }
+    
+    services["Google Cloud TTS"] = google_cloud_status
+    
+    # Current configuration
+    current_config = {
+        "primary_service": "Google Cloud TTS" if (google_tts_client and USE_GOOGLE_CLOUD_TTS) else "gTTS",
+        "fallback_service": "gTTS",
+        "default_voice": DEFAULT_VOICE,
+        "mock_mode": MOCK_MODE,
+        "debug_mode": DEBUG_MODE
+    }
+    
+    # Environment variables guide
+    env_guide = {
+        "GOOGLE_APPLICATION_CREDENTIALS": "Path to Google Cloud service account JSON file",
+        "MCP_TTS_USE_GOOGLE_CLOUD": "Set to 'true' to enable Google Cloud TTS",
+        "MCP_TTS_GOOGLE_VOICE_TYPE": "Set to 'standard' or 'wavenet' for voice quality",
+        "MCP_TTS_DEFAULT_VOICE": "Default language/voice code",
+        "MCP_TTS_MOCK_MODE": "Set to 'true' for testing without actual audio"
+    }
+    
+    return {
+        "success": True,
+        "content": {
+            "services": services,
+            "current_configuration": current_config,
+            "environment_variables": env_guide,
+            "server_version": SERVER_VERSION
+        }
+    }
 
 
 async def enhance_with_llm(message: str, msg_type: str, request_id: str = None) -> Optional[str]:
