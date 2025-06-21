@@ -29,6 +29,14 @@ from gtts import gTTS
 from scipy.io import wavfile
 from fastmcp import FastMCP
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.info("Loaded environment variables from .env file")
+except ImportError:
+    logger.info("python-dotenv not available, using system environment variables only")
+
 # Try to import Google Cloud TTS - optional feature
 try:
     from google.cloud import texttospeech
