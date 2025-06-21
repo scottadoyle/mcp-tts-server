@@ -1,4 +1,4 @@
-"""MCP Server for text-to-speech notifications.
+"""MCP Server for text-to-speech notifications with timer support.
 
 This server implements the Model Context Protocol (MCP) to provide
 text-to-speech capabilities for AI assistants to speak notifications
@@ -9,6 +9,7 @@ This implementation supports:
 - Roots for resource boundaries
 - Sampling for enhanced notification text generation
 - Tools for text-to-speech and notifications
+- Timer functionality with automatic notifications
 - Comprehensive debugging and logging
 - Inspector compatibility
 """
@@ -22,6 +23,9 @@ import traceback
 import uuid
 import math
 import numpy as np
+import asyncio
+import threading
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
 
 # Suppress pygame startup messages that can interfere with JSON communication
@@ -140,7 +144,7 @@ BELL_SETTINGS = {
 }
 
 # Configuration
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 DEFAULT_VOICE = os.getenv("MCP_TTS_DEFAULT_VOICE", "en")
 USE_HTTP_TRANSPORT = os.getenv("MCP_TTS_HTTP_TRANSPORT", "false").lower() in ("true", "1", "yes")
 HTTP_PORT = int(os.getenv("MCP_TTS_HTTP_PORT", "8080"))
@@ -397,6 +401,98 @@ TOOL_SCHEMA = {
             "openWorldHint": False,
             "isDebugTool": True
         }
+    },
+    "set_timer": {
+        "name": "set_timer",
+        "description": "Set a timer that will notify you with a spoken message when it expires",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Timer duration in seconds",
+                    "minimum": 1,
+                    "maximum": 86400
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message to speak when timer expires"
+                },
+                "voice": {
+                    "type": "string",
+                    "description": "Language/voice code (e.g., 'en', 'fr', 'en-US')",
+                    "default": DEFAULT_VOICE
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Type of notification",
+                    "enum": ["info", "success", "warning", "error"],
+                    "default": "info"
+                },
+                "repeat": {
+                    "type": "boolean",
+                    "description": "Whether to repeat the timer notification",
+                    "default": False
+                },
+                "repeat_interval": {
+                    "type": "number",
+                    "description": "Interval between repeat notifications in seconds (if repeat is true)",
+                    "minimum": 1,
+                    "maximum": 3600
+                }
+            },
+            "required": ["duration", "message"]
+        },
+        "annotations": {
+            "title": "Set Timer",
+            "readOnlyHint": False,
+            "openWorldHint": False
+        }
+    },
+    "list_timers": {
+        "name": "list_timers",
+        "description": "List all active timers",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "annotations": {
+            "title": "List Timers",
+            "readOnlyHint": True,
+            "openWorldHint": False
+        }
+    },
+    "cancel_timer": {
+        "name": "cancel_timer",
+        "description": "Cancel an active timer by its ID",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timer_id": {
+                    "type": "string",
+                    "description": "The ID of the timer to cancel"
+                }
+            },
+            "required": ["timer_id"]
+        },
+        "annotations": {
+            "title": "Cancel Timer",
+            "readOnlyHint": False,
+            "openWorldHint": False
+        }
+    },
+    "cancel_all_timers": {
+        "name": "cancel_all_timers",
+        "description": "Cancel all active timers",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "annotations": {
+            "title": "Cancel All Timers",
+            "readOnlyHint": False,
+            "openWorldHint": False
+        }
     }
 }
 
@@ -410,6 +506,113 @@ performance_stats = {
         "max_time": 0
     }
 }
+
+
+# Timer management
+timers = {}  # Dictionary to store active timers
+timer_counter = 0  # Counter for generating unique timer IDs
+timer_lock = threading.Lock()  # Thread lock for timer operations
+
+
+class Timer:
+    """Timer class for managing timed notifications."""
+    
+    def __init__(self, timer_id: str, duration: float, message: str, voice: str = None, 
+                 timer_type: str = "info", repeat: bool = False, repeat_interval: float = None):
+        self.timer_id = timer_id
+        self.duration = duration
+        self.message = message
+        self.voice = voice or DEFAULT_VOICE
+        self.timer_type = timer_type
+        self.repeat = repeat
+        self.repeat_interval = repeat_interval or duration
+        self.created_at = datetime.now()
+        self.expires_at = self.created_at + timedelta(seconds=duration)
+        self.is_active = True
+        self.thread = None
+        self.notification_count = 0
+    
+    def __repr__(self):
+        return f"Timer({self.timer_id}, expires_at={self.expires_at}, message='{self.message[:20]}...')"
+
+
+def timer_thread_worker(timer: Timer):
+    """Worker function that runs in a separate thread for each timer."""
+    try:
+        # Wait for the timer duration
+        time.sleep(timer.duration)
+        
+        # Check if timer is still active (not cancelled)
+        with timer_lock:
+            if not timer.is_active or timer.timer_id not in timers:
+                logger.debug(f"Timer {timer.timer_id} was cancelled before expiry")
+                return
+        
+        # Execute the timer notification
+        asyncio.create_task(execute_timer_notification(timer))
+        
+        # Handle repeat timers
+        if timer.repeat and timer.is_active:
+            # Schedule next notification
+            timer.expires_at = datetime.now() + timedelta(seconds=timer.repeat_interval)
+            timer.notification_count += 1
+            new_thread = threading.Thread(target=timer_thread_worker, args=(timer,))
+            new_thread.daemon = True
+            timer.thread = new_thread
+            new_thread.start()
+            logger.info(f"Repeat timer {timer.timer_id} scheduled for next notification")
+    
+    except Exception as e:
+        logger.error(f"Error in timer thread {timer.timer_id}: {e}")
+        logger.debug(traceback.format_exc())
+
+
+async def execute_timer_notification(timer: Timer):
+    """Execute the notification for an expired timer."""
+    try:
+        # Generate request ID for this timer notification
+        request_id = f"timer-{timer.timer_id}-{uuid.uuid4().hex[:8]}"
+        request_context.set_request_id(request_id)
+        
+        logger.info(f"Timer {timer.timer_id} expired, executing notification")
+        
+        # Format notification message
+        if timer.repeat and timer.notification_count > 0:
+            message = f"Timer reminder #{timer.notification_count + 1}: {timer.message}"
+        else:
+            message = f"Timer notification: {timer.message}"
+        
+        # Add type prefix
+        prefix = ""
+        if timer.timer_type == "success":
+            prefix = "Success! "
+        elif timer.timer_type == "warning":
+            prefix = "Warning! "
+        elif timer.timer_type == "error":
+            prefix = "Error! "
+        elif timer.timer_type == "info":
+            prefix = "Timer: "
+        
+        full_message = f"{prefix}{message}"
+        
+        # Speak the notification
+        success, error = await synthesize_and_play(full_message, timer.voice, request_id)
+        
+        if success:
+            logger.info(f"Timer notification spoken successfully for {timer.timer_id}")
+        else:
+            logger.error(f"Failed to speak timer notification for {timer.timer_id}: {error}")
+        
+        # Remove timer if it's not repeating or if it failed
+        if not timer.repeat or not success:
+            with timer_lock:
+                if timer.timer_id in timers:
+                    del timers[timer.timer_id]
+                    logger.info(f"Timer {timer.timer_id} removed")
+    
+    except Exception as e:
+        logger.error(f"Error executing timer notification {timer.timer_id}: {e}")
+        logger.debug(traceback.format_exc())
 
 
 def track_timing(category: str, name: str, duration: float):
@@ -1353,6 +1556,302 @@ async def tts_status(params: Dict[str, Any]):
     }
 
 
+@mcp.tool
+async def set_timer(params: Dict[str, Any]):
+    """Set a timer that will notify you with a spoken message when it expires.
+    
+    Args:
+        params: Dictionary containing:
+            - duration: Timer duration in seconds
+            - message: Message to speak when timer expires
+            - voice: Language/voice code (optional)
+            - type: Type of notification (optional)
+            - repeat: Whether to repeat the timer (optional)
+            - repeat_interval: Interval between repeats (optional)
+        
+    Returns:
+        Tool response with timer ID or error
+    """
+    global timer_counter
+    
+    # Generate unique request ID
+    request_id = f"set-timer-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    # Log the request if tracing is enabled
+    if TRACE_REQUESTS:
+        logger.debug(f"Tool call received: set_timer with params: {params}")
+    
+    start_time = time.time()
+    
+    duration = params.get("duration")
+    message = params.get("message", "")
+    voice = params.get("voice", DEFAULT_VOICE)
+    timer_type = params.get("type", "info")
+    repeat = params.get("repeat", False)
+    repeat_interval = params.get("repeat_interval")
+    
+    # Validate inputs
+    if not duration or duration < 1 or duration > 86400:  # Max 24 hours
+        logger.warning(f"Invalid duration: {duration}")
+        return {
+            "success": False,
+            "content": {"error": "Duration must be between 1 and 86400 seconds (24 hours)"}
+        }
+    
+    if not message:
+        logger.warning("No message provided for timer")
+        return {
+            "success": False,
+            "content": {"error": "Message is required for timer"}
+        }
+    
+    if repeat and repeat_interval and (repeat_interval < 1 or repeat_interval > 3600):
+        logger.warning(f"Invalid repeat interval: {repeat_interval}")
+        return {
+            "success": False,
+            "content": {"error": "Repeat interval must be between 1 and 3600 seconds (1 hour)"}
+        }
+    
+    try:
+        with timer_lock:
+            timer_counter += 1
+            timer_id = f"timer_{timer_counter}"
+        
+        # Create timer object
+        timer = Timer(
+            timer_id=timer_id,
+            duration=duration,
+            message=message,
+            voice=voice,
+            timer_type=timer_type,
+            repeat=repeat,
+            repeat_interval=repeat_interval
+        )
+        
+        # Start timer thread
+        timer_thread = threading.Thread(target=timer_thread_worker, args=(timer,))
+        timer_thread.daemon = True
+        timer.thread = timer_thread
+        
+        # Store timer
+        with timer_lock:
+            timers[timer_id] = timer
+        
+        # Start the timer
+        timer_thread.start()
+        
+        # Track performance
+        duration_elapsed = time.time() - start_time
+        track_timing("tool_calls", "set_timer", duration_elapsed)
+        
+        logger.info(f"Timer {timer_id} set for {duration} seconds: '{message}'")
+        
+        result = {
+            "result": f"Timer set successfully",
+            "timer_id": timer_id,
+            "duration_seconds": duration,
+            "message": message,
+            "expires_at": timer.expires_at.isoformat(),
+            "repeat": repeat
+        }
+        
+        if repeat:
+            result["repeat_interval"] = repeat_interval or duration
+        
+        return {
+            "success": True,
+            "content": result
+        }
+    
+    except Exception as e:
+        error_msg = f"Error setting timer: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return {
+            "success": False,
+            "content": {"error": error_msg}
+        }
+
+
+@mcp.tool
+async def list_timers(params: Dict[str, Any]):
+    """List all active timers.
+    
+    Returns:
+        Tool response with list of active timers
+    """
+    # Generate unique request ID
+    request_id = f"list-timers-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    # Log the request if tracing is enabled
+    if TRACE_REQUESTS:
+        logger.debug(f"Tool call received: list_timers with params: {params}")
+    
+    start_time = time.time()
+    
+    try:
+        with timer_lock:
+            active_timers = []
+            for timer_id, timer in timers.items():
+                if timer.is_active:
+                    time_remaining = (timer.expires_at - datetime.now()).total_seconds()
+                    active_timers.append({
+                        "timer_id": timer_id,
+                        "message": timer.message,
+                        "expires_at": timer.expires_at.isoformat(),
+                        "time_remaining_seconds": max(0, round(time_remaining, 1)),
+                        "type": timer.timer_type,
+                        "voice": timer.voice,
+                        "repeat": timer.repeat,
+                        "notification_count": timer.notification_count
+                    })
+        
+        # Track performance
+        duration = time.time() - start_time
+        track_timing("tool_calls", "list_timers", duration)
+        
+        logger.info(f"Listed {len(active_timers)} active timers")
+        
+        return {
+            "success": True,
+            "content": {
+                "result": f"Found {len(active_timers)} active timer(s)",
+                "timers": active_timers,
+                "count": len(active_timers)
+            }
+        }
+    
+    except Exception as e:
+        error_msg = f"Error listing timers: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return {
+            "success": False,
+            "content": {"error": error_msg}
+        }
+
+
+@mcp.tool
+async def cancel_timer(params: Dict[str, Any]):
+    """Cancel an active timer by its ID.
+    
+    Args:
+        params: Dictionary containing:
+            - timer_id: The ID of the timer to cancel
+        
+    Returns:
+        Tool response indicating success or failure
+    """
+    # Generate unique request ID
+    request_id = f"cancel-timer-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    # Log the request if tracing is enabled
+    if TRACE_REQUESTS:
+        logger.debug(f"Tool call received: cancel_timer with params: {params}")
+    
+    start_time = time.time()
+    
+    timer_id = params.get("timer_id", "")
+    
+    if not timer_id:
+        logger.warning("No timer_id provided for cancellation")
+        return {
+            "success": False,
+            "content": {"error": "timer_id is required"}
+        }
+    
+    try:
+        with timer_lock:
+            if timer_id not in timers:
+                logger.warning(f"Timer {timer_id} not found")
+                return {
+                    "success": False,
+                    "content": {"error": f"Timer {timer_id} not found"}
+                }
+            
+            timer = timers[timer_id]
+            timer.is_active = False
+            del timers[timer_id]
+        
+        # Track performance
+        duration = time.time() - start_time
+        track_timing("tool_calls", "cancel_timer", duration)
+        
+        logger.info(f"Timer {timer_id} cancelled successfully")
+        
+        return {
+            "success": True,
+            "content": {
+                "result": f"Timer {timer_id} cancelled successfully",
+                "timer_id": timer_id
+            }
+        }
+    
+    except Exception as e:
+        error_msg = f"Error cancelling timer: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return {
+            "success": False,
+            "content": {"error": error_msg}
+        }
+
+
+@mcp.tool
+async def cancel_all_timers(params: Dict[str, Any]):
+    """Cancel all active timers.
+    
+    Returns:
+        Tool response indicating success or failure
+    """
+    # Generate unique request ID
+    request_id = f"cancel-all-timers-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    # Log the request if tracing is enabled
+    if TRACE_REQUESTS:
+        logger.debug(f"Tool call received: cancel_all_timers with params: {params}")
+    
+    start_time = time.time()
+    
+    try:
+        with timer_lock:
+            cancelled_count = len(timers)
+            cancelled_ids = list(timers.keys())
+            
+            # Mark all timers as inactive and clear the dictionary
+            for timer in timers.values():
+                timer.is_active = False
+            timers.clear()
+        
+        # Track performance
+        duration = time.time() - start_time
+        track_timing("tool_calls", "cancel_all_timers", duration)
+        
+        logger.info(f"Cancelled {cancelled_count} timers: {cancelled_ids}")
+        
+        return {
+            "success": True,
+            "content": {
+                "result": f"Cancelled {cancelled_count} timer(s) successfully",
+                "cancelled_count": cancelled_count,
+                "cancelled_timer_ids": cancelled_ids
+            }
+        }
+    
+    except Exception as e:
+        error_msg = f"Error cancelling all timers: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return {
+            "success": False,
+            "content": {"error": error_msg}
+        }
+
+
 async def enhance_with_llm(message: str, msg_type: str, request_id: str = None) -> Optional[str]:
     """Enhance a notification message using LLM.
     
@@ -1399,42 +1898,19 @@ async def enhance_with_llm(message: str, msg_type: str, request_id: str = None) 
         return None
 
 
-# @mcp.resource_list
-async def list_resources(params: Dict[str, Any]) -> Dict[str, Any]:
-    """List available resources."""
-    logger.info("Listing resources")
-    
-    resources = []
-    
-    # Add notification template resources
-    for uri, content in RESOURCES.items():
-        name = uri.split("/")[-1]
-        resources.append({
-            "uri": uri,
-            "name": name,
-            "description": f"Notification template: {name}"
-        })
-    
-    return {
-        "resources": resources
-    }
+# Add resources to the MCP server
+from fastmcp.resources import TextResource
 
-
-# @mcp.resource_read
-async def read_resource(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Read a resource."""
-    uri = params.get("uri", "")
-    logger.info(f"Reading resource: {uri}")
-    
-    if uri in RESOURCES:
-        return {
-            "content": RESOURCES[uri],
-            "mimeType": "text/plain"
-        }
-    else:
-        return {
-            "error": f"Resource not found: {uri}"
-        }
+for uri, content in RESOURCES.items():
+    name = uri.split("/")[-1]
+    resource = TextResource(
+        uri=uri,
+        name=name,
+        description=f"Notification template: {name}",
+        text=content,
+        mime_type="text/plain"
+    )
+    mcp.add_resource(resource)
 
 
 # Configure server on connection

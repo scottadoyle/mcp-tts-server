@@ -8,6 +8,8 @@ An MCP (Model Context Protocol) server that provides text-to-speech capabilities
 - **Dual TTS support**: 
   - **gTTS** (default): Free, no credentials required
   - **Google Cloud TTS** (optional): Premium voices, requires setup
+- **Timer functionality**: Set timers with spoken notifications when they expire
+- **Repeating timers**: Support for recurring notifications at specified intervals
 - Automatic fallback from Google Cloud TTS to gTTS
 - Supports multiple languages and voices
 - Designed for AI assistants to notify users when not actively watching the screen
@@ -102,6 +104,63 @@ This MCP server provides the following tools:
 5. `test_notification` - Send a test notification to verify the server is working
    - Parameters:
      - `voice` (optional): Language/voice code (default: "en")
+
+6. `set_timer` - Set a timer that will notify you with a spoken message when it expires
+   - Parameters:
+     - `duration` (required): Timer duration in seconds (1-86400)
+     - `message` (required): Message to speak when timer expires
+     - `voice` (optional): Language/voice code (default: "en")
+     - `type` (optional): Type of notification ("info", "success", "warning", "error")
+     - `repeat` (optional): Whether to repeat the timer notification (default: false)
+     - `repeat_interval` (optional): Interval between repeat notifications in seconds (1-3600)
+
+7. `list_timers` - List all active timers
+   - Returns information about all currently running timers including time remaining
+
+8. `cancel_timer` - Cancel an active timer by its ID
+   - Parameters:
+     - `timer_id` (required): The ID of the timer to cancel
+
+9. `cancel_all_timers` - Cancel all active timers
+   - Removes all currently active timers
+
+10. `listen` - Listen for speech input and convert it to text using speech-to-text
+    - Parameters:
+      - `duration` (optional): Duration to listen in seconds (default: 5)
+      - `language` (optional): Language code for speech recognition (default: "en-US")
+
+11. `tts_status` - Get information about available TTS services and current configuration
+    - Returns detailed status of TTS services and server configuration
+
+### Timer Usage Examples
+
+The timer functionality allows you to set reminders that will speak notifications when they expire:
+
+```python
+# Set a simple 5-minute timer
+await set_timer({
+    "duration": 300,  # 5 minutes
+    "message": "Your 5-minute break is over!",
+    "type": "info"
+})
+
+# Set a repeating reminder every 30 seconds
+await set_timer({
+    "duration": 30,
+    "message": "Remember to drink water",
+    "type": "info",
+    "repeat": True,
+    "repeat_interval": 30
+})
+
+# Set a timer with a specific voice
+await set_timer({
+    "duration": 60,
+    "message": "Une minute s'est écoulée",
+    "voice": "fr-FR",
+    "type": "success"
+})
+```
 
 ## Advanced Features
 
