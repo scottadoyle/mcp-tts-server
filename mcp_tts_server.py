@@ -46,6 +46,14 @@ try:
 except ImportError:
     GOOGLE_CLOUD_TTS_AVAILABLE = False
 
+# Try to import Google Cloud Speech-to-Text - optional feature
+try:
+    from google.cloud import speech
+    import pyaudio
+    GOOGLE_CLOUD_STT_AVAILABLE = True
+except ImportError:
+    GOOGLE_CLOUD_STT_AVAILABLE = False
+
 # Configure logging
 log_level = os.getenv("MCP_TTS_LOG_LEVEL", "INFO")
 DEBUG_MODE = os.getenv("MCP_TTS_DEBUG", "false").lower() in ("true", "1", "yes")
@@ -144,6 +152,11 @@ GOOGLE_CLOUD_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 USE_GOOGLE_CLOUD_TTS = os.getenv("MCP_TTS_USE_GOOGLE_CLOUD", "false").lower() in ("true", "1", "yes")
 GOOGLE_CLOUD_TTS_VOICE_TYPE = os.getenv("MCP_TTS_GOOGLE_VOICE_TYPE", "standard")  # standard or wavenet
 
+# Google Cloud Speech-to-Text Configuration
+USE_GOOGLE_CLOUD_STT = os.getenv("MCP_TTS_USE_GOOGLE_CLOUD_STT", "true").lower() in ("true", "1", "yes")
+STT_LANGUAGE_CODE = os.getenv("MCP_TTS_STT_LANGUAGE", "en-US")
+STT_SAMPLE_RATE = int(os.getenv("MCP_TTS_STT_SAMPLE_RATE", "16000"))
+
 # Initialize MCP server
 mcp = FastMCP(
     "tts-notify"
@@ -168,6 +181,26 @@ elif USE_GOOGLE_CLOUD_TTS and not GOOGLE_CLOUD_TTS_AVAILABLE:
     logger.warning("Google Cloud TTS requested but library not installed. Install with: pip install google-cloud-texttospeech")
 else:
     logger.info("Using gTTS for text-to-speech")
+
+# Initialize Google Cloud Speech-to-Text client if available and configured
+google_stt_client = None
+if GOOGLE_CLOUD_STT_AVAILABLE and USE_GOOGLE_CLOUD_STT:
+    try:
+        if GOOGLE_CLOUD_CREDENTIALS_PATH and os.path.exists(GOOGLE_CLOUD_CREDENTIALS_PATH):
+            google_stt_client = speech.SpeechClient()
+            logger.info(f"Google Cloud STT client initialized with credentials from {GOOGLE_CLOUD_CREDENTIALS_PATH}")
+        else:
+            # Try to use default credentials
+            google_stt_client = speech.SpeechClient()
+            logger.info("Google Cloud STT client initialized with default credentials")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Google Cloud STT client: {e}")
+        logger.info("Speech-to-text will not be available")
+        google_stt_client = None
+elif USE_GOOGLE_CLOUD_STT and not GOOGLE_CLOUD_STT_AVAILABLE:
+    logger.warning("Google Cloud STT requested but library not installed. Install with: pip install google-cloud-speech pyaudio")
+else:
+    logger.info("Speech-to-text not enabled")
 
 # Define roots
 ROOTS = [
@@ -327,6 +360,30 @@ TOOL_SCHEMA = {
             "isDebugTool": True
         }
     },
+    "listen": {
+        "name": "listen",
+        "description": "Listen for speech input and convert it to text using speech-to-text",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Duration to listen in seconds (default: 5)",
+                    "default": 5
+                },
+                "language": {
+                    "type": "string", 
+                    "description": "Language code for speech recognition (e.g., 'en-US', 'fr-FR')",
+                    "default": STT_LANGUAGE_CODE
+                }
+            }
+        },
+        "annotations": {
+            "title": "Listen for Speech",
+            "readOnlyHint": True,
+            "openWorldHint": False
+        }
+    },
     "tts_status": {
         "name": "tts_status",
         "description": "Get information about available TTS services and current configuration",
@@ -373,6 +430,83 @@ def track_timing(category: str, name: str, duration: float):
     stats["total_time"] += duration
     stats["avg_time"] = stats["total_time"] / stats["count"]
     stats["max_time"] = max(stats["max_time"], duration)
+
+
+async def listen_for_speech(duration: float = 5.0, language_code: str = STT_LANGUAGE_CODE) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Listen for speech input and convert to text using Google Cloud STT.
+    
+    Args:
+        duration: Duration to listen in seconds
+        language_code: Language code for speech recognition
+        
+    Returns:
+        Tuple of (success, transcribed_text, error_message)
+    """
+    if not google_stt_client:
+        return False, None, "Google Cloud Speech-to-Text client not available"
+    
+    try:
+        # Initialize PyAudio
+        audio = pyaudio.PyAudio()
+        
+        # Audio recording parameters
+        chunk = 1024
+        sample_format = pyaudio.paInt16  # 16 bits per sample
+        channels = 1
+        fs = STT_SAMPLE_RATE  # Record at sample rate
+        
+        logger.info(f"Listening for speech for {duration} seconds...")
+        
+        # Start recording
+        stream = audio.open(format=sample_format,
+                           channels=channels,
+                           rate=fs,
+                           frames_per_buffer=chunk,
+                           input=True)
+        
+        frames = []  # Initialize array to store frames
+        
+        # Store data in chunks for duration seconds
+        for i in range(0, int(fs / chunk * duration)):
+            data = stream.read(chunk)
+            frames.append(data)
+        
+        # Stop and close the stream
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
+        
+        logger.info("Finished recording, processing speech...")
+        
+        # Convert recorded audio to bytes
+        audio_data = b''.join(frames)
+        
+        # Configure the audio for Google Cloud STT
+        audio_config = speech.RecognitionAudio(content=audio_data)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=fs,
+            language_code=language_code,
+        )
+        
+        # Perform the transcription
+        response = google_stt_client.recognize(config=config, audio=audio_config)
+        
+        # Extract the transcribed text
+        if response.results:
+            transcript = response.results[0].alternatives[0].transcript
+            confidence = response.results[0].alternatives[0].confidence
+            logger.info(f"Transcribed: '{transcript}' (confidence: {confidence:.2f})")
+            return True, transcript, None
+        else:
+            logger.info("No speech detected or could not transcribe")
+            return False, None, "No speech detected or could not transcribe"
+            
+    except Exception as e:
+        error_msg = f"Error during speech recognition: {e}"
+        logger.error(error_msg)
+        logger.debug(traceback.format_exc())
+        return False, None, error_msg
 
 
 def generate_bell_sound(bell_type: str, count: int = 1) -> Tuple[bool, Optional[str]]:
@@ -621,6 +755,63 @@ async def synthesize_and_play(text: str, voice: str = DEFAULT_VOICE, request_id:
         logger.error(error_msg)
         logger.debug(traceback.format_exc())
         return False, error_msg
+
+
+@mcp.tool
+async def listen(params: Dict[str, Any]):
+    """Listen for speech input and convert it to text using speech-to-text.
+    
+    Args:
+        params: Dictionary containing:
+            - duration: Duration to listen in seconds (optional, default: 5)
+            - language: Language code for speech recognition (optional)
+        
+    Returns:
+        Tool response with transcribed text or error
+    """
+    # Generate unique request ID
+    request_id = f"listen-{uuid.uuid4().hex[:8]}"
+    request_context.set_request_id(request_id)
+    
+    # Log the request if tracing is enabled
+    if TRACE_REQUESTS:
+        logger.debug(f"Tool call received: listen with params: {params}")
+    
+    start_time = time.time()
+    
+    duration = params.get("duration", 5.0)
+    language = params.get("language", STT_LANGUAGE_CODE)
+    
+    # Validate duration
+    if duration < 1 or duration > 30:
+        logger.warning(f"Invalid duration: {duration}, clamping to 1-30 seconds")
+        duration = max(1, min(30, duration))
+    
+    logger.info(f"Starting speech recognition for {duration} seconds in {language}")
+    
+    success, transcript, error = await listen_for_speech(duration, language)
+    
+    # Track performance
+    duration_actual = time.time() - start_time
+    track_timing("tool_calls", "listen", duration_actual)
+    
+    if success:
+        logger.info(f"Successfully transcribed speech: '{transcript}' (completed in {duration_actual:.2f}s)")
+        return {
+            "success": True,
+            "content": {
+                "result": "Successfully transcribed speech",
+                "transcript": transcript,
+                "duration_seconds": round(duration_actual, 2),
+                "language": language
+            }
+        }
+    else:
+        logger.error(f"Failed to transcribe speech: {error}")
+        return {
+            "success": False,
+            "content": {"error": error or "Failed to transcribe speech"}
+        }
 
 
 @mcp.tool
@@ -1100,11 +1291,42 @@ async def tts_status(params: Dict[str, Any]):
     
     services["Google Cloud TTS"] = google_cloud_status
     
+    # Check Google Cloud STT availability
+    if GOOGLE_CLOUD_STT_AVAILABLE:
+        google_cloud_stt_status = {
+            "available": True,
+            "description": "Google Cloud Speech-to-Text API",
+            "features": "Real-time speech recognition with high accuracy",
+            "cost": "Free tier: 60 minutes/month",
+            "requires_credentials": True,
+            "configured": google_stt_client is not None,
+            "language": STT_LANGUAGE_CODE,
+            "enabled": USE_GOOGLE_CLOUD_STT
+        }
+        
+        if google_stt_client:
+            google_cloud_stt_status["status"] = "Ready"
+        elif USE_GOOGLE_CLOUD_STT:
+            google_cloud_stt_status["status"] = "Enabled but not initialized (check credentials)"
+        else:
+            google_cloud_stt_status["status"] = "Available but disabled"
+    else:
+        google_cloud_stt_status = {
+            "available": False,
+            "description": "Google Cloud Speech-to-Text API",
+            "status": "Library not installed (pip install google-cloud-speech pyaudio)",
+            "requires_credentials": True
+        }
+    
+    services["Google Cloud STT"] = google_cloud_stt_status
+    
     # Current configuration
     current_config = {
-        "primary_service": "Google Cloud TTS" if (google_tts_client and USE_GOOGLE_CLOUD_TTS) else "gTTS",
-        "fallback_service": "gTTS",
+        "primary_tts_service": "Google Cloud TTS" if (google_tts_client and USE_GOOGLE_CLOUD_TTS) else "gTTS",
+        "fallback_tts_service": "gTTS",
+        "stt_service": "Google Cloud STT" if (google_stt_client and USE_GOOGLE_CLOUD_STT) else "Not available",
         "default_voice": DEFAULT_VOICE,
+        "stt_language": STT_LANGUAGE_CODE,
         "mock_mode": MOCK_MODE,
         "debug_mode": DEBUG_MODE
     }
@@ -1112,6 +1334,8 @@ async def tts_status(params: Dict[str, Any]):
     # Environment variables guide
     env_guide = {
         "GOOGLE_APPLICATION_CREDENTIALS": "Path to Google Cloud service account JSON file",
+        "MCP_TTS_USE_GOOGLE_CLOUD_STT": "Set to 'true' to enable Google Cloud Speech-to-Text",
+        "MCP_TTS_STT_LANGUAGE": "Language code for speech recognition (e.g., 'en-US')",
         "MCP_TTS_USE_GOOGLE_CLOUD": "Set to 'true' to enable Google Cloud TTS",
         "MCP_TTS_GOOGLE_VOICE_TYPE": "Set to 'standard' or 'wavenet' for voice quality",
         "MCP_TTS_DEFAULT_VOICE": "Default language/voice code",
